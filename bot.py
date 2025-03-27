@@ -1,6 +1,7 @@
 import telebot
 from telebot import types
 from config import TOKEN, ADMIN_ID
+from firebase_admin import firestore
 from database import (
     create_tables,
     add_user,
@@ -8,7 +9,7 @@ from database import (
     add_vacancy,
     get_all_vacancies,
     get_vacancy_by_id,
-    get_vacancies_by_category,
+    get_vacancies_by_category_paginated,
     get_user
 )
 import re
@@ -21,6 +22,8 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+db = firestore.client()
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -100,42 +103,77 @@ def list_categories(message):
 
     bot.send_message(message.chat.id, '📋 Выберите категорию вакансий:', reply_markup=markup)
 
-@bot.message_handler(func=lambda message: message.text == '📋 Вакансии')
-def handle_vacancies(message):
-    list_categories(message)
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith('category_'))
 def callback_category(call):
     category = call.data.split('_')[1]
-    vacancies = get_vacancies_by_category(category)
+    chat_id = call.message.chat.id
+    
+    vacancies, last_doc = get_vacancies_by_category_paginated(category)
+    
+    if not vacancies:
+        bot.send_message(chat_id, f'Вакансий для категории "{category}" нет.')
+        return
+    
+    send_vacancies(chat_id, vacancies)
+    
+    if last_doc:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "Ещё", 
+            callback_data=f"more_{category}_{last_doc.id}"
+        ))
+        bot.send_message(chat_id, "Показано 5 вакансий. Загрузить ещё?", reply_markup=markup)
 
-    if vacancies:
-        for vacancy_id, title, description, _ in vacancies:
-            text = f"📝 <b>{title}</b>\n\n{description}"
+def send_vacancies(chat_id, vacancies):
+    for vacancy_id, title, description, _ in vacancies:
+        text = f"📝 <b>{title}</b>\n\n{description}"
+        
+        url_pattern = r'(https?://[^\s]+)'
+        urls = re.findall(url_pattern, description)
+        
+        if urls:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("Подробнее", url=urls[0]))
+            bot.send_message(
+                chat_id,
+                text,
+                parse_mode='HTML',
+                reply_markup=markup,
+                disable_web_page_preview=True
+            )
+        else:
+            bot.send_message(
+                chat_id,
+                text,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
 
-            url_pattern = r'(https?://[^\s]+)'
-            urls = re.findall(url_pattern, description)
-
-            if urls:
-                url = urls[0]
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("Подробнее", url=url))
-                bot.send_message(
-                    call.message.chat.id,
-                    text,
-                    parse_mode='HTML',
-                    reply_markup=markup,
-                    disable_web_page_preview=True
-                )
-            else:
-                bot.send_message(
-                    call.message.chat.id,
-                    text,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
+@bot.callback_query_handler(func=lambda call: call.data.startswith('more_'))
+def callback_more(call):
+    data = call.data.split('_')
+    category = data[1]
+    last_doc_id = data[2]
+    chat_id = call.message.chat.id
+    
+    last_doc = db.collection('vacancies').document(last_doc_id).get()
+    vacancies, new_last_doc = get_vacancies_by_category_paginated(category, last_doc)
+    
+    if not vacancies:
+        bot.send_message(chat_id, "Вы получили все доступные вакансии. 🏁")
+        return
+    
+    send_vacancies(chat_id, vacancies)
+    
+    if new_last_doc:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "Ещё", 
+            callback_data=f"more_{category}_{new_last_doc.id}"
+        ))
+        bot.send_message(chat_id, "Загрузить ещё?", reply_markup=markup)
     else:
-        bot.send_message(call.message.chat.id, f'Вакансий для категории "{category}" нет.')
+        bot.send_message(chat_id, "Вы получили все доступные вакансии. �")
 
 def admin_add_title(message):
     user_id = message.from_user.id
@@ -183,7 +221,6 @@ def process_category_selection(message, title, description):
     bot.send_message(message.chat.id, '✅ Вакансия добавлена!')
     del user_states[user_id]
     show_main_menu(message.chat.id)
-
 
 if __name__ == '__main__':
     bot.polling(none_stop=True)

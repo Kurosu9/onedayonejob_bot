@@ -43,17 +43,30 @@ def add_vacancy(title, description, category):
     except Exception as e:
         print(f"Ошибка при добавлении вакансии: {e}")
 
-def get_vacancies_by_category(category):
+def get_vacancies_by_category_paginated(category, last_doc=None, limit=5):
     try:
-        vacancies_ref = db.collection('vacancies').where('category', '==', category).stream()
-        vacancies = [
-            (vacancy.id, vacancy.to_dict()['title'], vacancy.to_dict()['description'], vacancy.to_dict()['category'])
-            for vacancy in vacancies_ref
-        ]
-        return vacancies
+        vacancies_ref = db.collection('vacancies').where('category', '==', category)
+        
+        if last_doc:
+            vacancies_ref = vacancies_ref.start_after(last_doc).limit(limit)
+        else:
+            vacancies_ref = vacancies_ref.limit(limit)
+            
+        vacancies = vacancies_ref.stream()
+        
+        result = []
+        last_document = None
+        
+        for vacancy in vacancies:
+            data = vacancy.to_dict()
+            result.append((vacancy.id, data['title'], data['description'], data['category']))
+            last_document = vacancy
+            
+        return result, last_document
+        
     except Exception as e:
         print(f"Ошибка при получении вакансий: {e}")
-        return []
+        return [], None
 
 def get_vacancy_by_id(vacancy_id):
     try:
